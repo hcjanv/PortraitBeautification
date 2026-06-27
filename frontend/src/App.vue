@@ -19,7 +19,16 @@ import {
 } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
-type FeatureKey = "beauty" | "smoothSkin" | "slimFace";
+type FeatureKey =
+  | "beauty"
+  | "smoothSkin"
+  | "slimFace"
+  | "blemishRepair"
+  | "bigEyes"
+  | "slimNose"
+  | "softenSmileLines"
+  | "teethWhitening"
+  | "backgroundBlur";
 
 interface FeatureState {
   key: FeatureKey;
@@ -32,6 +41,17 @@ interface FeatureState {
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const strengthFieldByFeature: Record<FeatureKey, string> = {
+  beauty: "beautyStrength",
+  smoothSkin: "smoothStrength",
+  slimFace: "slimStrength",
+  blemishRepair: "blemishStrength",
+  bigEyes: "bigEyeStrength",
+  slimNose: "slimNoseStrength",
+  softenSmileLines: "smileLineStrength",
+  teethWhitening: "teethStrength",
+  backgroundBlur: "backgroundBlurStrength",
+};
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const selectedFile = ref<File | null>(null);
@@ -51,6 +71,7 @@ const previewScale = ref(1);
 const previewOffset = reactive({ x: 0, y: 0 });
 const isPanningPreview = ref(false);
 const panStart = reactive({ x: 0, y: 0, offsetX: 0, offsetY: 0 });
+const compareValue = ref(50);
 
 const MIN_PREVIEW_SCALE = 1;
 const MAX_PREVIEW_SCALE = 6;
@@ -79,11 +100,65 @@ const features = reactive<FeatureState[]>([
   {
     key: "slimFace",
     label: "瘦脸",
-    description: "检测面部关键点后做轻量局部变形",
+    description: "脸颊、颧骨和下颌的高精度局部变形",
     enabled: true,
     strength: 35,
     min: 0,
     max: 80,
+  },
+  {
+    key: "blemishRepair",
+    label: "祛痘",
+    description: "自动淡化小痘印和局部瑕疵",
+    enabled: false,
+    strength: 45,
+    min: 0,
+    max: 100,
+  },
+  {
+    key: "bigEyes",
+    label: "大眼",
+    description: "局部放大眼部，控制五官自然度",
+    enabled: false,
+    strength: 35,
+    min: 0,
+    max: 80,
+  },
+  {
+    key: "slimNose",
+    label: "瘦鼻",
+    description: "收窄鼻翼和鼻头，避免鼻梁漂移",
+    enabled: false,
+    strength: 35,
+    min: 0,
+    max: 80,
+  },
+  {
+    key: "softenSmileLines",
+    label: "法令纹",
+    description: "局部提亮和平滑鼻唇沟阴影",
+    enabled: false,
+    strength: 35,
+    min: 0,
+    max: 100,
+  },
+  {
+    key: "teethWhitening",
+    label: "白牙",
+    description: "检测口腔亮色区域后降低黄调",
+    enabled: false,
+    strength: 45,
+    min: 0,
+    max: 100,
+  },
+  {
+    key: "backgroundBlur",
+    label: "虚化",
+    description: "保护人物主体，柔化背景干扰",
+    enabled: false,
+    strength: 45,
+    min: 0,
+    max: 100,
   },
 ]);
 
@@ -123,6 +198,14 @@ const previewImageStyle = computed(() => ({
   transform: `translate3d(${previewOffset.x}px, ${previewOffset.y}px, 0) scale(${previewScale.value})`,
 }));
 
+const compareAfterStyle = computed(() => ({
+  clipPath: `inset(0 ${100 - compareValue.value}% 0 0)`,
+}));
+
+const compareDividerStyle = computed(() => ({
+  left: `${compareValue.value}%`,
+}));
+
 function openFilePicker() {
   fileInput.value?.click();
 }
@@ -149,6 +232,7 @@ function setSelectedFile(file: File) {
   processingMessage.value = "";
   outputFileName.value = "";
   outputSize.value = "";
+  compareValue.value = 50;
   closePreview();
   revokeResultUrl();
 
@@ -184,11 +268,9 @@ async function processImage() {
 
   for (const feature of features) {
     formData.append(feature.key, String(feature.enabled));
+    formData.append(strengthFieldByFeature[feature.key], String(feature.strength));
   }
 
-  formData.append("beautyStrength", String(findFeature("beauty").strength));
-  formData.append("smoothStrength", String(findFeature("smoothSkin").strength));
-  formData.append("slimStrength", String(findFeature("slimFace").strength));
   formData.append("outputFormat", "jpg");
   formData.append("jpegQuality", "95");
 
@@ -215,6 +297,7 @@ async function processImage() {
     outputSize.value = formatBytes(blob.size);
     resultUrl.value = URL.createObjectURL(blob);
     processingMessage.value = message ? decodeURIComponent(message) : "处理完成";
+    compareValue.value = 50;
     progress.value = 100;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -246,14 +329,6 @@ function stopProgressPulse() {
     window.clearInterval(progressTimer.value);
     progressTimer.value = null;
   }
-}
-
-function findFeature(key: FeatureKey) {
-  const feature = features.find((item) => item.key === key);
-  if (!feature) {
-    throw new Error(`Feature ${key} not found`);
-  }
-  return feature;
 }
 
 function readFilename(contentDisposition: string | null) {
@@ -468,6 +543,7 @@ function resetAll() {
   processingMessage.value = "";
   errorMessage.value = "";
   progress.value = 0;
+  compareValue.value = 50;
   closePreview();
   revokeOriginalUrl();
   revokeResultUrl();
@@ -639,19 +715,32 @@ onBeforeUnmount(() => {
           <h2>处理结果</h2>
         </div>
 
-        <button
-          v-if="resultUrl"
-          class="preview-frame preview-action result-frame"
-          type="button"
-          aria-label="放大查看处理结果"
-          @click="openPreview(resultUrl, '处理结果预览')"
-        >
-          <img :src="resultUrl" alt="处理结果预览" />
-          <span class="preview-hint">
-            <Maximize2 :size="16" />
-            放大查看
-          </span>
-        </button>
+        <div v-if="resultUrl" class="compare-frame result-frame">
+          <img class="compare-image" :src="originalUrl" alt="修图前" draggable="false" />
+          <div class="compare-after" :style="compareAfterStyle">
+            <img class="compare-image" :src="resultUrl" alt="修图后" draggable="false" />
+          </div>
+          <div class="compare-divider" :style="compareDividerStyle">
+            <span />
+          </div>
+          <input
+            v-model.number="compareValue"
+            class="compare-slider"
+            type="range"
+            min="0"
+            max="100"
+            aria-label="拖拽查看前后对比"
+          />
+          <button
+            class="preview-icon-button"
+            type="button"
+            aria-label="放大查看处理结果"
+            title="放大查看处理结果"
+            @click="openPreview(resultUrl, '处理结果预览')"
+          >
+            <Maximize2 :size="17" />
+          </button>
+        </div>
         <div v-else class="preview-frame result-frame">
           <div class="empty-preview">
             <Download :size="40" />

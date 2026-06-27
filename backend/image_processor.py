@@ -58,6 +58,10 @@ FACE_OVAL_INDICES = (
     109,
 )
 
+LEFT_EYE_INDICES = (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
+RIGHT_EYE_INDICES = (263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466)
+INNER_MOUTH_INDICES = (78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191)
+
 LEFT_SLIM_CONTROLS = (
     (234, 0.42, 1.14),
     (93, 0.62, 1.12),
@@ -93,9 +97,21 @@ class ProcessOptions:
     beauty: bool = True
     smooth_skin: bool = True
     slim_face: bool = True
+    blemish_repair: bool = False
+    big_eyes: bool = False
+    slim_nose: bool = False
+    soften_smile_lines: bool = False
+    teeth_whitening: bool = False
+    background_blur: bool = False
     beauty_strength: int = 60
     smooth_strength: int = 55
     slim_strength: int = 35
+    blemish_strength: int = 45
+    big_eye_strength: int = 35
+    slim_nose_strength: int = 35
+    smile_line_strength: int = 35
+    teeth_strength: int = 45
+    background_blur_strength: int = 45
     output_format: OutputFormat = "jpg"
     jpeg_quality: int = 95
 
@@ -142,11 +158,61 @@ def process_upload(file_bytes: bytes, original_filename: str, options: ProcessOp
         image = apply_smooth_skin(image, options.smooth_strength)
         LOGGER.info("smooth skin step completed in %.2fs", time.perf_counter() - step_started)
 
+    needs_mesh = any(
+        (
+            options.slim_face,
+            options.big_eyes,
+            options.slim_nose,
+            options.soften_smile_lines,
+            options.teeth_whitening,
+            options.background_blur,
+        )
+    )
+    face_mesh: FaceMesh | None = None
+    mesh_message = ""
+    if needs_mesh:
+        face_mesh, mesh_message = detect_face_mesh(image)
+
+    if options.blemish_repair:
+        step_started = time.perf_counter()
+        image = apply_blemish_repair(image, options.blemish_strength, face_mesh)
+        LOGGER.info("blemish repair step completed in %.2fs", time.perf_counter() - step_started)
+
+    if options.soften_smile_lines:
+        step_started = time.perf_counter()
+        image, message = apply_smile_line_soften(image, options.smile_line_strength, face_mesh, mesh_message)
+        messages.append(message)
+        LOGGER.info("smile line step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
+
+    if options.teeth_whitening:
+        step_started = time.perf_counter()
+        image, message = apply_teeth_whitening(image, options.teeth_strength, face_mesh, mesh_message)
+        messages.append(message)
+        LOGGER.info("teeth whitening step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
+
     if options.slim_face:
         step_started = time.perf_counter()
-        image, slim_message = apply_slim_face(image, options.slim_strength)
+        image, slim_message = apply_slim_face(image, options.slim_strength, face_mesh, mesh_message)
         messages.append(slim_message)
         LOGGER.info("slim face step completed in %.2fs message=%s", time.perf_counter() - step_started, slim_message)
+
+    if options.big_eyes:
+        step_started = time.perf_counter()
+        image, message = apply_big_eyes(image, options.big_eye_strength, face_mesh, mesh_message)
+        messages.append(message)
+        LOGGER.info("big eyes step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
+
+    if options.slim_nose:
+        step_started = time.perf_counter()
+        image, message = apply_slim_nose(image, options.slim_nose_strength, face_mesh, mesh_message)
+        messages.append(message)
+        LOGGER.info("slim nose step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
+
+    if options.background_blur:
+        step_started = time.perf_counter()
+        image, message = apply_background_blur(image, options.background_blur_strength, face_mesh, mesh_message)
+        messages.append(message)
+        LOGGER.info("background blur step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
 
     step_started = time.perf_counter()
     output_format = normalize_output_format(options.output_format)
@@ -255,15 +321,251 @@ def build_skin_mask(image: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(skin_mask, (0, 0), 5)
 
 
-def apply_slim_face(image: np.ndarray, strength: int) -> tuple[np.ndarray, str]:
+def apply_blemish_repair(image: np.ndarray, strength: int, face_mesh: FaceMesh | None = None) -> np.ndarray:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image
+
+    skin_mask = build_skin_mask(image)
+    if face_mesh is not None:
+        face_mask = build_expanded_face_mask(face_mesh.points, image.shape[:2], 1.12)
+        skin_mask = cv2.bitwise_and(skin_mask, face_mask)
+
+    if skin_mask.max() == 0:
+        return image
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    median = cv2.medianBlur(image, 9)
+    median_lab = cv2.cvtColor(median, cv2.COLOR_BGR2LAB)
+
+    l_channel, a_channel, _ = cv2.split(lab)
+    median_l, median_a, _ = cv2.split(median_lab)
+    skin = skin_mask > 40
+    redness = a_channel.astype(np.int16) - median_a.astype(np.int16)
+    darkness = median_l.astype(np.int16) - l_channel.astype(np.int16)
+
+    red_spots = redness > int(5 + (1.0 - amount) * 4)
+    dark_spots = darkness > int(8 + (1.0 - amount) * 8)
+    candidate = (skin & (red_spots | dark_spots)).astype(np.uint8) * 255
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    repair_mask = filter_small_components(candidate, image.shape[:2])
+    if repair_mask.max() == 0:
+        return image
+
+    repair_mask = cv2.dilate(repair_mask, kernel, iterations=1)
+    repaired = cv2.inpaint(image, repair_mask, 3, cv2.INPAINT_TELEA)
+    alpha = cv2.GaussianBlur(repair_mask.astype(np.float32) / 255.0, (0, 0), 1.8)
+    alpha = alpha[:, :, None] * (0.52 + amount * 0.34)
+    result = image.astype(np.float32) * (1.0 - alpha) + repaired.astype(np.float32) * alpha
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def filter_small_components(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    total_area = height * width
+    min_area = max(4, int(total_area * 0.0000015))
+    max_area = max(60, int(total_area * 0.00022))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    filtered = np.zeros_like(mask)
+
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        box_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        box_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if min_area <= area <= max_area and max(box_w, box_h) <= min(width, height) * 0.055:
+            filtered[labels == label] = 255
+
+    return filtered
+
+
+def apply_smile_line_soften(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None,
+    mesh_message: str,
+) -> tuple[np.ndarray, str]:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image, "法令纹强度为 0，已跳过"
+    if face_mesh is None:
+        return image, f"{mesh_message or '未检测到人脸'}；已跳过淡化法令纹"
+
+    points = face_mesh.points
+    face_width = estimate_face_width(points)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    thickness = max(5, int(round(face_width * (0.030 + amount * 0.018))))
+    draw_landmark_polyline(mask, points, (98, 203, 206, 216, 61), thickness)
+    draw_landmark_polyline(mask, points, (327, 423, 426, 436, 291), thickness)
+    mouth_mask = build_polygon_mask(points, INNER_MOUTH_INDICES, image.shape[:2])
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(mouth_mask))
+    mask_float = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), face_width * 0.012)
+
+    if mask_float.max() <= 0:
+        return image, "未定位到法令纹区域，已跳过"
+
+    filtered = cv2.bilateralFilter(image, d=9, sigmaColor=28 + int(amount * 22), sigmaSpace=10)
+    lab = cv2.cvtColor(filtered, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[:, :, 0] = np.clip(lab[:, :, 0] + 255 * amount * 0.018, 0, 255)
+    softened = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+    alpha = mask_float[:, :, None] * (0.22 + amount * 0.28)
+    result = image.astype(np.float32) * (1.0 - alpha) + softened.astype(np.float32) * alpha
+    return np.clip(result, 0, 255).astype(np.uint8), "处理完成（淡化法令纹）"
+
+
+def apply_teeth_whitening(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None,
+    mesh_message: str,
+) -> tuple[np.ndarray, str]:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image, "牙齿美白强度为 0，已跳过"
+    if face_mesh is None:
+        return image, f"{mesh_message or '未检测到人脸'}；已跳过美白牙齿"
+
+    mouth_mask = build_polygon_mask(face_mesh.points, INNER_MOUTH_INDICES, image.shape[:2])
+    if mouth_mask.max() == 0:
+        return image, "未定位到口腔区域，已跳过美白牙齿"
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    _, saturation, value = cv2.split(hsv)
+    tooth_candidate = ((mouth_mask > 0) & (value > 72) & (saturation < 132)).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    tooth_candidate = cv2.morphologyEx(tooth_candidate, cv2.MORPH_OPEN, kernel, iterations=1)
+    tooth_candidate = cv2.dilate(tooth_candidate, kernel, iterations=1)
+
+    if tooth_candidate.max() == 0:
+        return image, "未检测到可美白牙齿区域，已跳过"
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab[:, :, 0] = np.clip(lab[:, :, 0] + 255 * amount * 0.035, 0, 255)
+    lab[:, :, 2] = np.clip(lab[:, :, 2] - 255 * amount * 0.028, 0, 255)
+    whitened = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    mask_float = cv2.GaussianBlur(tooth_candidate.astype(np.float32) / 255.0, (0, 0), 1.2)
+    alpha = mask_float[:, :, None] * (0.45 + amount * 0.28)
+    result = image.astype(np.float32) * (1.0 - alpha) + whitened.astype(np.float32) * alpha
+    return np.clip(result, 0, 255).astype(np.uint8), "处理完成（美白牙齿）"
+
+
+def apply_big_eyes(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None,
+    mesh_message: str,
+) -> tuple[np.ndarray, str]:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image, "大眼强度为 0，已跳过"
+    if face_mesh is None:
+        return image, f"{mesh_message or '未检测到人脸'}；已跳过大眼"
+
+    result = image
+    amount_curve = float(np.power(amount, 0.82))
+    scale_strength = 0.045 + amount_curve * 0.155
+
+    for indices in (LEFT_EYE_INDICES, RIGHT_EYE_INDICES):
+        eye_points = face_mesh.points[list(indices)]
+        center = np.mean(eye_points, axis=0)
+        eye_width = float(np.max(eye_points[:, 0]) - np.min(eye_points[:, 0]))
+        eye_height = float(np.max(eye_points[:, 1]) - np.min(eye_points[:, 1]))
+        radius = max(eye_width * (1.18 + amount_curve * 0.32), eye_height * 2.0, 12.0)
+        result = local_scale_warp(result, (float(center[0]), float(center[1])), radius, scale_strength)
+
+    return result, "处理完成（大眼）"
+
+
+def apply_slim_nose(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None,
+    mesh_message: str,
+) -> tuple[np.ndarray, str]:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image, "瘦鼻强度为 0，已跳过"
+    if face_mesh is None:
+        return image, f"{mesh_message or '未检测到人脸'}；已跳过瘦鼻"
+
+    points = face_mesh.points
+    face_width = estimate_face_width(points)
+    nose_width = max(float(abs(points[327][0] - points[98][0])), face_width * 0.10)
+    center_x = float(np.mean([points[1][0], points[4][0], points[168][0]]))
+    amount_curve = float(np.power(amount, 0.82))
+    base_shift = min(nose_width * (0.035 + amount_curve * 0.135), face_width * 0.026)
+    radius = face_width * (0.045 + amount_curve * 0.026)
+    controls: list[WarpControl] = []
+
+    for index, move_scale, radius_scale in (
+        (98, 1.00, 1.00),
+        (97, 0.82, 0.92),
+        (49, 0.70, 0.86),
+        (64, 0.54, 0.78),
+        (327, 1.00, 1.00),
+        (326, 0.82, 0.92),
+        (279, 0.70, 0.86),
+        (294, 0.54, 0.78),
+    ):
+        point = points[index]
+        direction = 1.0 if point[0] < center_x else -1.0
+        controls.append(
+            WarpControl(
+                point=(float(point[0]), float(point[1])),
+                delta=(float(direction * base_shift * move_scale), 0.0),
+                radius=float(radius * radius_scale),
+            )
+        )
+
+    nose_points = points[[1, 4, 5, 49, 64, 97, 98, 168, 279, 294, 326, 327]]
+    margin = int(round(face_width * 0.13))
+    bounds = landmark_bounds(nose_points, image.shape[:2], margin)
+    result = apply_control_point_warp(image, controls, bounds, face_width * (0.012 + amount_curve * 0.026))
+    return result, "处理完成（瘦鼻）"
+
+
+def apply_background_blur(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None,
+    mesh_message: str,
+) -> tuple[np.ndarray, str]:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image, "背景虚化强度为 0，已跳过"
+    if face_mesh is None:
+        return image, f"{mesh_message or '未检测到人脸'}；已跳过背景虚化"
+
+    mask = build_portrait_foreground_mask(face_mesh.points, image.shape[:2])
+    sigma = 4.0 + amount * 12.0
+    blurred = cv2.GaussianBlur(image, (0, 0), sigma)
+    mask_float = mask[:, :, None]
+    result = image.astype(np.float32) * mask_float + blurred.astype(np.float32) * (1.0 - mask_float)
+    return np.clip(result, 0, 255).astype(np.uint8), "处理完成（背景虚化）"
+
+
+def apply_slim_face(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None = None,
+    mesh_message: str = "",
+) -> tuple[np.ndarray, str]:
     amount = clamp01(strength / 100)
     if amount <= 0:
         return image, "瘦脸强度为 0，已跳过"
 
-    face_mesh, mesh_message = detect_face_mesh(image)
     if face_mesh is not None:
         result = apply_mesh_slim_face(image, face_mesh.points, amount)
         return result, "处理完成（FaceLandmarker 高精度瘦脸）"
+
+    if not mesh_message:
+        face_mesh, mesh_message = detect_face_mesh(image)
+        if face_mesh is not None:
+            result = apply_mesh_slim_face(image, face_mesh.points, amount)
+            return result, "处理完成（FaceLandmarker 高精度瘦脸）"
 
     face_points = detect_face_points_with_opencv(image)
     if face_points is not None:
@@ -529,6 +831,202 @@ def build_face_influence_mask(
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
     mask = cv2.dilate(mask, kernel, iterations=1)
     mask_float = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), blur_sigma)
+    return np.clip(mask_float, 0.0, 1.0)
+
+
+def estimate_face_width(points: np.ndarray) -> float:
+    face_oval = points[list(FACE_OVAL_INDICES)]
+    return float(max(np.max(face_oval[:, 0]) - np.min(face_oval[:, 0]), 1.0))
+
+
+def build_expanded_face_mask(points: np.ndarray, shape: tuple[int, int], scale: float) -> np.ndarray:
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    oval = points[list(FACE_OVAL_INDICES)].astype(np.float32)
+    center = np.mean(oval, axis=0)
+    expanded = (oval - center) * scale + center
+    hull = cv2.convexHull(np.round(expanded).astype(np.int32))
+    cv2.fillConvexPoly(mask, hull, 255)
+    return mask
+
+
+def build_polygon_mask(points: np.ndarray, indices: tuple[int, ...], shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    polygon = np.round(points[list(indices)]).astype(np.int32)
+    polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+    polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+    cv2.fillPoly(mask, [polygon], 255)
+    return mask
+
+
+def draw_landmark_polyline(mask: np.ndarray, points: np.ndarray, indices: tuple[int, ...], thickness: int) -> None:
+    polyline = np.round(points[list(indices)]).astype(np.int32)
+    cv2.polylines(mask, [polyline], isClosed=False, color=255, thickness=thickness, lineType=cv2.LINE_AA)
+
+
+def landmark_bounds(points: np.ndarray, shape: tuple[int, int], margin: int) -> tuple[int, int, int, int]:
+    height, width = shape
+    min_x, min_y = np.min(points, axis=0)
+    max_x, max_y = np.max(points, axis=0)
+    left = max(int(min_x) - margin, 0)
+    right = min(int(max_x) + margin, width - 1)
+    top = max(int(min_y) - margin, 0)
+    bottom = min(int(max_y) + margin, height - 1)
+    return left, top, right, bottom
+
+
+def local_scale_warp(
+    image: np.ndarray,
+    center: tuple[float, float],
+    radius: float,
+    scale_strength: float,
+) -> np.ndarray:
+    height, width = image.shape[:2]
+    cx, cy = center
+    radius = max(radius, 2.0)
+    left = max(int(cx - radius), 0)
+    right = min(int(cx + radius), width - 1)
+    top = max(int(cy - radius), 0)
+    bottom = min(int(cy + radius), height - 1)
+
+    if left >= right or top >= bottom:
+        return image
+
+    roi = image[top : bottom + 1, left : right + 1]
+    grid_x, grid_y = np.meshgrid(
+        np.arange(left, right + 1, dtype=np.float32),
+        np.arange(top, bottom + 1, dtype=np.float32),
+    )
+    dx = grid_x - cx
+    dy = grid_y - cy
+    distance_square = dx * dx + dy * dy
+    radius_square = radius * radius
+    inside = distance_square < radius_square
+
+    map_x = grid_x.copy()
+    map_y = grid_y.copy()
+    weight = np.zeros_like(grid_x, dtype=np.float32)
+    t = 1.0 - distance_square[inside] / radius_square
+    weight[inside] = t * t * (3.0 - 2.0 * t)
+    factor = 1.0 - clamp01(scale_strength) * weight
+    map_x = cx + dx * factor
+    map_y = cy + dy * factor
+
+    warped_roi = cv2.remap(
+        roi,
+        (map_x - left).astype(np.float32),
+        (map_y - top).astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+    result = image.copy()
+    result[top : bottom + 1, left : right + 1] = warped_roi
+    return result
+
+
+def apply_control_point_warp(
+    image: np.ndarray,
+    controls: list[WarpControl],
+    bounds: tuple[int, int, int, int],
+    max_displacement: float,
+) -> np.ndarray:
+    if not controls:
+        return image
+
+    left, top, right, bottom = bounds
+    if left >= right or top >= bottom:
+        return image
+
+    roi = image[top : bottom + 1, left : right + 1]
+    grid_x, grid_y = np.meshgrid(
+        np.arange(left, right + 1, dtype=np.float32),
+        np.arange(top, bottom + 1, dtype=np.float32),
+    )
+
+    disp_x = np.zeros_like(grid_x, dtype=np.float32)
+    disp_y = np.zeros_like(grid_y, dtype=np.float32)
+    total_weight = np.zeros_like(grid_x, dtype=np.float32)
+
+    for control in controls:
+        cx, cy = control.point
+        dx, dy = control.delta
+        radius_square = max(control.radius * control.radius, 1.0)
+        distance_square = (grid_x - cx) ** 2 + (grid_y - cy) ** 2
+        active = distance_square < radius_square
+        if not np.any(active):
+            continue
+
+        weight = np.zeros_like(grid_x, dtype=np.float32)
+        t = 1.0 - distance_square[active] / radius_square
+        weight[active] = t * t * (3.0 - 2.0 * t)
+        disp_x += weight * dx
+        disp_y += weight * dy
+        total_weight += weight
+
+    active = total_weight > 1.0
+    disp_x[active] /= total_weight[active]
+    disp_y[active] /= total_weight[active]
+
+    magnitude = np.sqrt(disp_x * disp_x + disp_y * disp_y)
+    capped = magnitude > max_displacement
+    if np.any(capped):
+        cap_scale = max_displacement / np.maximum(magnitude[capped], 1e-6)
+        disp_x[capped] *= cap_scale
+        disp_y[capped] *= cap_scale
+
+    map_x = (grid_x - disp_x - left).astype(np.float32)
+    map_y = (grid_y - disp_y - top).astype(np.float32)
+    warped_roi = cv2.remap(
+        roi,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+
+    result = image.copy()
+    result[top : bottom + 1, left : right + 1] = warped_roi
+    return result
+
+
+def build_portrait_foreground_mask(points: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    face_oval = points[list(FACE_OVAL_INDICES)]
+    min_x, min_y = np.min(face_oval, axis=0)
+    max_x, max_y = np.max(face_oval, axis=0)
+    face_width = float(max(max_x - min_x, 1.0))
+    face_height = float(max(max_y - min_y, 1.0))
+    center_x = float(np.mean(face_oval[:, 0]))
+    center_y = float(np.mean(face_oval[:, 1]))
+
+    expanded_face = build_expanded_face_mask(points, shape, 1.32)
+    mask = cv2.bitwise_or(mask, expanded_face)
+
+    head_center = (int(round(center_x)), int(round(center_y - face_height * 0.10)))
+    head_axes = (int(round(face_width * 0.72)), int(round(face_height * 0.70)))
+    cv2.ellipse(mask, head_center, head_axes, 0, 0, 360, 255, -1)
+
+    shoulder_y = min(height - 1, int(round(max_y + face_height * 0.18)))
+    bottom_y = min(height - 1, int(round(max_y + face_height * 2.1)))
+    torso = np.array(
+        [
+            [int(round(center_x - face_width * 0.76)), shoulder_y],
+            [int(round(center_x + face_width * 0.76)), shoulder_y],
+            [int(round(center_x + face_width * 1.18)), bottom_y],
+            [int(round(center_x - face_width * 1.18)), bottom_y],
+        ],
+        dtype=np.int32,
+    )
+    torso[:, 0] = np.clip(torso[:, 0], 0, width - 1)
+    torso[:, 1] = np.clip(torso[:, 1], 0, height - 1)
+    cv2.fillConvexPoly(mask, torso, 255)
+
+    dilate_size = make_odd(max(15, int(round(face_width * 0.12))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    mask_float = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), face_width * 0.045)
     return np.clip(mask_float, 0.0, 1.0)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from urllib.parse import quote
 
@@ -12,17 +13,43 @@ from .image_processor import ImageProcessingError, ProcessOptions, process_uploa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "https://portraitbeautification.netlify.app",
+]
+DEFAULT_ALLOWED_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1):\d+$"
+MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+
+
+def parse_allowed_origins(value: str | None) -> list[str]:
+    if not value:
+        return DEFAULT_ALLOWED_ORIGINS
+    return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+
+def parse_upload_limit(value: str | None) -> int:
+    if not value:
+        return MAX_UPLOAD_BYTES
+    try:
+        parsed = int(value)
+    except ValueError:
+        return MAX_UPLOAD_BYTES
+    return parsed if parsed > 0 else MAX_UPLOAD_BYTES
+
+
+ALLOWED_ORIGINS = parse_allowed_origins(os.getenv("ALLOWED_ORIGINS"))
+ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", DEFAULT_ALLOWED_ORIGIN_REGEX).strip() or None
+UPLOAD_LIMIT_BYTES = parse_upload_limit(os.getenv("MAX_UPLOAD_BYTES"))
+
 app = FastAPI(title="Portrait Beautification API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +91,9 @@ async def process_image(
     validate_upload(image)
 
     data = await image.read()
+    if len(data) > UPLOAD_LIMIT_BYTES:
+        raise_upload_too_large()
+
     if not data:
         raise HTTPException(status_code=400, detail="上传文件为空。")
 
@@ -114,6 +144,13 @@ def validate_upload(image: UploadFile) -> None:
     allowed_types = {"image/jpeg", "image/png", "image/webp"}
     if image.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail="仅支持 JPG、PNG 或 WebP 图片。")
+    if image.size is not None and image.size > UPLOAD_LIMIT_BYTES:
+        raise_upload_too_large()
+
+
+def raise_upload_too_large() -> None:
+    limit_mb = UPLOAD_LIMIT_BYTES / (1024 * 1024)
+    raise HTTPException(status_code=413, detail=f"图片不能超过 {limit_mb:g} MB。")
 
 
 def build_content_disposition(filename: str) -> str:

@@ -5,6 +5,7 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  VITE_API_BASE_URL = "https://bridgette10-portraitbeautification-api.hf.space"
 
 [[redirects]]
   from = "/*"

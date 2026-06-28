@@ -1,3 +1,10 @@
+---
+title: Portrait Beautification API
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # 人像美颜
 
 本项目是一个本地运行的人像美颜工具。前端使用 Vite + Vue 3 + TypeScript 提供图片上传、参数调节、前后对比、放大缩放预览和结果下载；后端使用 FastAPI + OpenCV + MediaPipe Face Landmarker 对人像图片做美颜、磨皮、瘦脸、五官微调和局部修复。

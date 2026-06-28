@@ -61,6 +61,7 @@ FACE_OVAL_INDICES = (
 LEFT_EYE_INDICES = (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
 RIGHT_EYE_INDICES = (263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466)
 INNER_MOUTH_INDICES = (78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191)
+OUTER_MOUTH_INDICES = (61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185)
 
 LEFT_SLIM_CONTROLS = (
     (234, 0.42, 1.14),
@@ -100,6 +101,7 @@ class ProcessOptions:
     blemish_repair: bool = False
     big_eyes: bool = False
     slim_nose: bool = False
+    small_mouth: bool = False
     soften_smile_lines: bool = False
     teeth_whitening: bool = False
     background_blur: bool = False
@@ -109,6 +111,7 @@ class ProcessOptions:
     blemish_strength: int = 45
     big_eye_strength: int = 35
     slim_nose_strength: int = 35
+    small_mouth_strength: int = 25
     smile_line_strength: int = 35
     teeth_strength: int = 45
     background_blur_strength: int = 45
@@ -163,6 +166,7 @@ def process_upload(file_bytes: bytes, original_filename: str, options: ProcessOp
             options.slim_face,
             options.big_eyes,
             options.slim_nose,
+            options.small_mouth,
             options.soften_smile_lines,
             options.teeth_whitening,
             options.background_blur,
@@ -207,6 +211,12 @@ def process_upload(file_bytes: bytes, original_filename: str, options: ProcessOp
         image, message = apply_slim_nose(image, options.slim_nose_strength, face_mesh, mesh_message)
         messages.append(message)
         LOGGER.info("slim nose step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
+
+    if options.small_mouth:
+        step_started = time.perf_counter()
+        image, message = apply_small_mouth(image, options.small_mouth_strength, face_mesh, mesh_message)
+        messages.append(message)
+        LOGGER.info("small mouth step completed in %.2fs message=%s", time.perf_counter() - step_started, message)
 
     if options.background_blur:
         step_started = time.perf_counter()
@@ -525,6 +535,90 @@ def apply_slim_nose(
     bounds = landmark_bounds(nose_points, image.shape[:2], margin)
     result = apply_control_point_warp(image, controls, bounds, face_width * (0.012 + amount_curve * 0.026))
     return result, "处理完成（瘦鼻）"
+
+
+def apply_small_mouth(
+    image: np.ndarray,
+    strength: int,
+    face_mesh: FaceMesh | None,
+    mesh_message: str,
+) -> tuple[np.ndarray, str]:
+    amount = clamp01(strength / 100)
+    if amount <= 0:
+        return image, "小嘴强度为 0，已跳过"
+    if face_mesh is None:
+        return image, f"{mesh_message or '未检测到人脸'}；已跳过小嘴"
+
+    result = apply_mesh_small_mouth(image, face_mesh.points, amount)
+    return result, "处理完成（小嘴）"
+
+
+def apply_mesh_small_mouth(image: np.ndarray, points: np.ndarray, amount: float) -> np.ndarray:
+    required_indices = OUTER_MOUTH_INDICES + INNER_MOUTH_INDICES + (13, 14, 61, 291)
+    if len(points) <= max(required_indices):
+        return image
+
+    height, width = image.shape[:2]
+    face_width = estimate_face_width(points)
+    if face_width < 20:
+        return image
+
+    mouth_points = points[list(OUTER_MOUTH_INDICES + INNER_MOUTH_INDICES)]
+    mouth_min = np.min(mouth_points, axis=0)
+    mouth_max = np.max(mouth_points, axis=0)
+    mouth_width = max(float(abs(points[291][0] - points[61][0])), float(mouth_max[0] - mouth_min[0]), face_width * 0.12)
+    mouth_height = max(float(mouth_max[1] - mouth_min[1]), float(abs(points[14][1] - points[13][1])) * 1.5, face_width * 0.035)
+    if mouth_width < 6 or mouth_height < 4:
+        return image
+
+    center = np.mean(points[[13, 14, 61, 291]], axis=0)
+    center_x = float(center[0])
+    center_y = float(center[1])
+    amount_curve = float(np.power(amount, 0.82))
+    shrink_x = min(0.035 + amount_curve * 0.150, 0.18)
+    shrink_y = min(0.014 + amount_curve * 0.074, 0.09)
+    radius_x = max(mouth_width * (1.05 + amount_curve * 0.20), face_width * (0.17 + amount_curve * 0.025))
+    radius_y = max(mouth_height * (2.05 + amount_curve * 0.45), face_width * (0.080 + amount_curve * 0.025))
+    radius_y = min(radius_y, face_width * 0.15)
+
+    left = max(int(center_x - radius_x * 1.18), 0)
+    right = min(int(center_x + radius_x * 1.18), width - 1)
+    top = max(int(center_y - radius_y * 1.18), 0)
+    bottom = min(int(center_y + radius_y * 1.18), height - 1)
+    if left >= right or top >= bottom:
+        return image
+
+    roi = image[top : bottom + 1, left : right + 1]
+    grid_x, grid_y = np.meshgrid(
+        np.arange(left, right + 1, dtype=np.float32),
+        np.arange(top, bottom + 1, dtype=np.float32),
+    )
+    norm_x = (grid_x - center_x) / max(radius_x, 1.0)
+    norm_y = (grid_y - center_y) / max(radius_y, 1.0)
+    distance = norm_x * norm_x + norm_y * norm_y
+    active = distance < 1.0
+    if not np.any(active):
+        return image
+
+    weight = np.zeros_like(grid_x, dtype=np.float32)
+    t = 1.0 - distance[active]
+    weight[active] = t * t * (3.0 - 2.0 * t)
+
+    map_x = grid_x.copy()
+    map_y = grid_y.copy()
+    map_x[active] = center_x + (grid_x[active] - center_x) * (1.0 + shrink_x * weight[active])
+    map_y[active] = center_y + (grid_y[active] - center_y) * (1.0 + shrink_y * weight[active])
+
+    warped_roi = cv2.remap(
+        roi,
+        (map_x - left).astype(np.float32),
+        (map_y - top).astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101,
+    )
+    result = image.copy()
+    result[top : bottom + 1, left : right + 1] = warped_roi
+    return result
 
 
 def apply_background_blur(

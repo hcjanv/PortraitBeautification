@@ -81,7 +81,7 @@ PortraitBeautification
 ### 1. 后端
 
 ```powershell
-cd F:\PortraitBeautification
+cd \PortraitBeautification
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -97,7 +97,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ### 2. 前端
 
 ```powershell
-cd F:\PortraitBeautification\frontend
+cd \PortraitBeautification\frontend
 npm install
 ```
 
@@ -114,7 +114,7 @@ npm config set registry https://registry.npmjs.org/
 推荐使用项目脚本：
 
 ```powershell
-cd F:\PortraitBeautification
+cd \PortraitBeautification
 .\start-backend.ps1
 ```
 
@@ -133,7 +133,7 @@ http://127.0.0.1:8000
 手动启动方式：
 
 ```powershell
-cd F:\PortraitBeautification
+cd \PortraitBeautification
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
@@ -143,7 +143,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 打开另一个 PowerShell：
 
 ```powershell
-cd F:\PortraitBeautification\frontend
+cd \PortraitBeautification\frontend
 npm run dev
 ```
 
@@ -264,14 +264,14 @@ npm run dev
 前端构建检查：
 
 ```powershell
-cd F:\PortraitBeautification\frontend
+cd \PortraitBeautification\frontend
 npm run build
 ```
 
 后端语法检查：
 
 ```powershell
-cd F:\PortraitBeautification
+cd \PortraitBeautification
 .\.venv\Scripts\python.exe -m compileall backend
 ```
 
